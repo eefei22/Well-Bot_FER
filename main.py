@@ -108,28 +108,36 @@ async def detect_emotion(
         # --- MODEL RUNS HERE (Untouched) ---
         result = predict_emotion(image)
         current_emotion = result['emotion']
+        server_message = "Processed. No aggregation yet."
         
-        # --- BUFFER LOGIC HERE ---
+        # Buffer Logic
         if current_emotion.lower() != "none":
             
-            # 1. Add to Memory
+            # A. Add to Memory
             aggregated_emotion = buffer_manager.add_entry(validated_id, current_emotion)
             
-            # 2. If Buffer is full (5 mins passed), Save to DB
-            if aggregated_emotion and supabase:
-                now = datetime.datetime.now(datetime.timezone.utc)
-                db_record = {
-                    "user_id": validated_id,
-                    "timestamp": now.isoformat(),
-                    "predicted_emotion": aggregated_emotion,
-                    "emotion_confidence": 1.0, 
-                    "date": now.strftime("%Y-%m-%d")
-                }
-                try:
-                    supabase.table("face_emotion").insert(db_record).execute()
-                except Exception as e:
-                    logging.error(f"DB Error: {e}")
+            # B. Check if Aggregation Happened
+            if aggregated_emotion:
+                server_message = f"AGGREGATION COMPLETE: Saved '{aggregated_emotion}' to DB."
+                
+                # Save to DB
+                if supabase:
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    db_record = {
+                        "user_id": validated_id,
+                        "timestamp": now.isoformat(),
+                        "predicted_emotion": aggregated_emotion,
+                        "emotion_confidence": 1.0, 
+                        "date": now.strftime("%Y-%m-%d")
+                    }
+                    try:
+                        supabase.table("face_emotion").insert(db_record).execute()
+                    except Exception as e:
+                        logging.error(f"DB Error: {e}")
 
+        # Attach the message to the response
+        result["server_message"] = server_message
+        
         return result
 
     except HTTPException:

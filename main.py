@@ -1,10 +1,10 @@
 import os
 import logging
 import datetime
-import uuid  # Imported to generate valid UUIDs
 import numpy as np
 import cv2
-from fastapi import FastAPI, UploadFile, File
+import uuid
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fer_model import predict_emotion
@@ -41,9 +41,24 @@ app.add_middleware(
 )
 
 @app.post("/emotion")
-async def detect_emotion(file: UploadFile = File(...)):
+async def detect_emotion(
+    file: UploadFile = File(...), 
+    user_id: str = Form(...)  
+):
     try:
-        logging.info(f"Received file: {file.filename}")
+        # This checks if the string is a valid UUID
+        uuid_obj = uuid.UUID(user_id)
+        # Re-assign to string to ensure it's in a standardized format
+        user_id = str(uuid_obj)
+    except ValueError:
+        logging.warning(f"Invalid UUID format received: {user_id}")
+        return JSONResponse(
+            content={"error": "Invalid user_id format. Must be a valid UUID string."}, 
+            status_code=400
+        )
+    
+    try:
+        logging.info(f"Received file from user: {user_id}")
         contents = await file.read()
 
         # Decode image
@@ -74,30 +89,19 @@ async def detect_emotion(file: UploadFile = File(...)):
             
             # Map data to your exact table columns
             db_record = {
-                # Generates a random UUID. Replace this if you have a real user ID.
-                "user_id": os.environ.get("DEV_USER_ID"),
-                
-                # 'timestamp without time zone' expects ISO format
+                # Use the user_id from the request body instead of the environment variable
+                "user_id": user_id, 
                 "timestamp": now.isoformat(),
-                
-                # 'character varying'
                 "predicted_emotion": result["emotion"],
-                
-                # 'double precision'
                 "emotion_confidence": float(result["confidence"]),
-                
-                # 'date' column expects YYYY-MM-DD
                 "date": now.strftime("%Y-%m-%d")
             }
 
             try:
-                # Ensure the table name is correct. Based on previous context, 
-                # you called it 'emotion_logs' or 'face_emotion'. Update below if needed.
-                response = supabase.table("face_emotion").insert(db_record).execute()
-                logging.info("Logged prediction to Supabase.")
+                supabase.table("face_emotion").insert(db_record).execute()
+                logging.info(f"Logged prediction to Supabase for user {user_id}.")
             except Exception as db_err:
                 logging.error(f"Failed to save to Supabase: {db_err}")
-                # We log the error but return the prediction result so the Pi doesn't crash
         
         return result
 

@@ -1,38 +1,24 @@
 import os
 import logging
 import datetime
+import uuid
 import numpy as np
 import cv2
-import uuid
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fer_model import predict_emotion
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
 load_dotenv()
-
-# Initialize Logging
 logging.basicConfig(level=logging.INFO)
-
 app = FastAPI()
 
-# ---------------------------------------------------------
-# 1. SETUP SUPABASE CONNECTION
-# ---------------------------------------------------------
+# --- Connection Setup ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
-if SUPABASE_URL and SUPABASE_KEY:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-else:
-    logging.warning("Supabase keys not found! Database save will fail.")
-    supabase = None
-
-# ---------------------------------------------------------
-# 2. CORS
-# ---------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,57 +26,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def get_validated_uuid(request_id: str) -> str:
+    """Helper to handle the hierarchy: Request Form -> Env Var -> Error."""
+    # 1. Check Request ID
+    if request_id:
+        try:
+            return str(uuid.UUID(request_id))
+        except ValueError:
+            logging.warning(f"Invalid UUID in request: {request_id}")
+
+    # 2. Check Environment Fallback
+    env_id = os.environ.get("DEV_USER_ID")
+    if env_id:
+        try:
+            return str(uuid.UUID(env_id))
+        except ValueError:
+            logging.error(f"Invalid UUID in DEV_USER_ID env: {env_id}")
+
+    return None
+
 @app.post("/emotion")
 async def detect_emotion(
     file: UploadFile = File(...), 
-    user_id: str = Form(...)  
+    user_id: str = Form(None) 
 ):
-    try:
-        # This checks if the string is a valid UUID
-        uuid_obj = uuid.UUID(user_id)
-        # Re-assign to string to ensure it's in a standardized format
-        user_id = str(uuid_obj)
-    except ValueError:
-        logging.warning(f"Invalid UUID format received: {user_id}")
-        return JSONResponse(
-            content={"error": "Invalid user_id format. Must be a valid UUID string."}, 
-            status_code=400
-        )
-    
-    try:
-        logging.info(f"Received file from user: {user_id}")
-        contents = await file.read()
+    # 1. Identity Validation
+    validated_id = get_validated_uuid(user_id)
+    if not validated_id:
+        raise HTTPException(status_code=400, detail="Valid UUID required (from form or env)")
 
-        # Decode image
+    try:
+        # 2. Image Processing
+        contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if image is None:
-            return JSONResponse(content={"error": "Could not decode image"}, status_code=400)
+            raise HTTPException(status_code=400, detail="Could not decode image")
 
-        # ---------------------------------------------------------
-        # 3. RUN FER MODEL
-        # ---------------------------------------------------------
-        try:
-            result = predict_emotion(image)
-        except Exception as pe:
-            logging.exception("Error inside predict_emotion()")
-            return JSONResponse(content={"error": f"Prediction failed: {str(pe)}"}, status_code=500)
+        # 3. Model Inference
+        result = predict_emotion(image)
+        logging.info(f"User {validated_id} result: {result['emotion']}")
 
-        logging.info(f"Prediction result: {result}")
-
-        # ---------------------------------------------------------
-        # 4. SAVE TO SUPABASE (Updated for your Schema)
-        # ---------------------------------------------------------
+        # 4. Database Persistence
         if result["emotion"].lower() != "none" and supabase:
+            # Use timezone-aware UTC
+            now = datetime.datetime.now(datetime.timezone.utc)
             
-            # Get current time
-            now = datetime.datetime.utcnow()
-            
-            # Map data to your exact table columns
             db_record = {
-                # Use the user_id from the request body instead of the environment variable
-                "user_id": user_id, 
+                "user_id": validated_id, # Fixed: using validated variable
                 "timestamp": now.isoformat(),
                 "predicted_emotion": result["emotion"],
                 "emotion_confidence": float(result["confidence"]),
@@ -99,12 +83,13 @@ async def detect_emotion(
 
             try:
                 supabase.table("face_emotion").insert(db_record).execute()
-                logging.info(f"Logged prediction to Supabase for user {user_id}.")
             except Exception as db_err:
-                logging.error(f"Failed to save to Supabase: {db_err}")
+                logging.error(f"Supabase error: {db_err}")
         
         return result
 
+    except HTTPException:
+        raise # Re-raise FastAPI-specific errors
     except Exception as e:
-        logging.exception("Exception in /emotion")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        logging.exception("Internal Server Error")
+        raise HTTPException(status_code=500, detail=str(e))

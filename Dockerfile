@@ -16,4 +16,5 @@ COPY . .
 
 # Command to run FastAPI using Uvicorn
 # Google Cloud Run expects the app to listen on port 8080
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# We added '--workers 1' to ensure the Memory Buffer is not split across processes
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

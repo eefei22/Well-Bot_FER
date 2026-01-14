@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fer_model import predict_emotion
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from status_tracker import status_tracker, router as status_router
 # removed 'collections' because we use max() now, not Counter()
 
 # --- 1. Buffer Logic (Max Confidence Strategy) ---
@@ -91,6 +92,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include status tracking routes
+app.include_router(status_router)
+
 def get_validated_uuid(request_id: str) -> str:
     if request_id:
         try:
@@ -114,6 +118,10 @@ async def detect_emotion(
     if not validated_id:
         raise HTTPException(status_code=400, detail="Valid UUID required")
 
+    # Track request
+    request_timestamp = datetime.datetime.now(datetime.timezone.utc)
+    status_tracker.log_request(validated_id, request_timestamp, file.filename)
+
     try:
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
@@ -129,6 +137,8 @@ async def detect_emotion(
         current_confidence = float(result.get('confidence', 0.0))
         
         server_message = "Processed. No aggregation yet."
+        db_write_success = False
+        aggregation_complete = False
         
         # --- BUFFER LOGIC (Always Run) ---
         if True:
@@ -138,6 +148,7 @@ async def detect_emotion(
             # If aggregation_result is not None, it contains the tuple (emotion, score)
             if aggregation_result:
                 agg_emotion, agg_conf = aggregation_result
+                aggregation_complete = True
                 
                 server_message = f"AGGREGATION COMPLETE: Saved '{agg_emotion}' ({agg_conf:.2f}) to DB."
                 
@@ -152,8 +163,21 @@ async def detect_emotion(
                     }
                     try:
                         supabase.table("face_emotion").insert(db_record).execute()
+                        db_write_success = True
                     except Exception as e:
                         logging.error(f"DB Error: {e}")
+                        db_write_success = False
+
+        # Track result
+        result_timestamp = datetime.datetime.now(datetime.timezone.utc)
+        status_tracker.log_result(
+            validated_id,
+            result_timestamp,
+            current_emotion,
+            current_confidence,
+            db_write_success=db_write_success,
+            aggregation_complete=aggregation_complete
+        )
 
         result["server_message"] = server_message
         return result
